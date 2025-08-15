@@ -1,3 +1,5 @@
+CMAKE_ARGS += -DCMAKE_INSTALL_PREFIX=/data/local/tmp/Android-tools/usr/local/h2o
+CMAKE_ARGS += -DBUILD_SHARED_LIBS=OFF
 CONTAINER_NAME=h2oserver/h2o-ci:ubuntu1604
 SRC_DIR=/h2o
 CHECK_MK=$(SRC_DIR)/misc/docker-ci/check.mk
