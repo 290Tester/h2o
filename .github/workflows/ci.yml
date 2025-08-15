@@ -1,15 +1,19 @@
 name: CI
 
-on: [push, pull_request,workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
     name: "${{ matrix.name }}"
-    runs-on: [ubuntu-24.04]
+    runs-on: ubuntu-24.04
 
-    # We want to run on external PRs, but not on our own internal PRs as they'll be run
-    # by the push to the branch.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    # 不跑内部 PR
+    if: |
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
 
     strategy:
       fail-fast: false
@@ -32,51 +36,71 @@ jobs:
 
     timeout-minutes: 60
     steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: recursive
-    - name: setup-docker
-      uses: docker/setup-docker-action@v4
-      with:
-        daemon-config: |
-          {
-            "ipv6": true,
-            "fixed-cidr-v6": "2001:db8:1::/64"
-          }
-        channel: stable
-    - name: Run with Docker
-      shell: 'script -q -e -c "bash -xe {0}"'
-      run: |
-        chmod -R ugo+w .
-        ${{ matrix.command }}
-        # if there's a summary markdown in the container, show it.
-        container_id=$(docker container ls -al --format '{{ .ID }}')
-        docker cp $container_id:/home/ci/summary.md $GITHUB_STEP_SUMMARY || true
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-  # See https://github.com/google/oss-fuzz/tree/master/projects/h2o for details
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v4
+        with:
+          daemon-config: |
+            {
+              "ipv6": true,
+              "fixed-cidr-v6": "2001:db8:1::/64"
+            }
+          channel: stable
+
+      # 真正跑测试
+      - name: Run with Docker
+        shell: 'script -q -e -c "bash -xe {0}"'
+        run: |
+          chmod -R ugo+w .
+          ${{ matrix.command }}
+
+      # 收集产物
+      - name: Extract artifacts
+        run: |
+          cid=$(docker container ls -al --format '{{ .ID }}')
+          mkdir -p _artifacts
+          docker cp $cid:/home/ci/build/h2o               _artifacts/h2o  || true
+          docker cp $cid:/home/ci/build/h2o-httpclient    _artifacts/h2o-httpclient || true
+          docker cp $cid:/home/ci/coverage                _artifacts/coverage || true
+          docker cp $cid:/home/ci/summary.md              _artifacts/summary.md || true
+          # 如需更多文件，按同样方式拷
+
+      # 上传成 GitHub Actions Artifact
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2o-${{ matrix.name }}-artifacts
+          path: _artifacts/
+          retention-days: 7
+
+  # OSS-Fuzz 任务保持不变
   ossfuzz:
     name: OSS Fuzz
     runs-on: ubuntu-latest
-
-    # see above
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
-
+    if: |
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
     timeout-minutes: 60
     steps:
-    - name: Build Fuzzers
-      uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'h2o'
-        dry-run: false
-    - name: Run Fuzzers
-      uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
-      with:
-        oss-fuzz-project-name: 'h2o'
-        fuzz-seconds: 600
-        dry-run: false
-    - name: Upload Crash
-      uses: actions/upload-artifact@v4
-      if: failure()
-      with:
-        name: artifacts
-        path: ./out/artifacts
+      - name: Build Fuzzers
+        uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@master
+        with:
+          oss-fuzz-project-name: 'h2o'
+          dry-run: false
+
+      - name: Run Fuzzers
+        uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
+        with:
+          oss-fuzz-project-name: 'h2o'
+          fuzz-seconds: 600
+          dry-run: false
+
+      - name: Upload Crash
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ossfuzz-artifacts
+          path: ./out/artifacts
