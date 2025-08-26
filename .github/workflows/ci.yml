@@ -1,18 +1,15 @@
 name: CI
 
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
+on: [push, pull_request]
 
 jobs:
   build:
     name: "${{ matrix.name }}"
-    runs-on: ubuntu-24.04-arm
+    runs-on: [ubuntu-24.04]
 
-    if: |
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name != github.repository
+    # We want to run on external PRs, but not on our own internal PRs as they'll be run
+    # by the push to the branch.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
 
     strategy:
       fail-fast: false
@@ -35,6 +32,61 @@ jobs:
 
     timeout-minutes: 60
     steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    - name: setup-docker
+      uses: docker/setup-docker-action@v4
+      with:
+        daemon-config: |
+          {
+            "ipv6": true,
+            "fixed-cidr-v6": "2001:db8:1::/64"
+          }
+        channel: stable
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      continue-on-error: true
+
+    - name: Run with Docker
+      shell: 'script -q -e -c "bash -xe {0}"'
+      run: |
+        chmod -R ugo+w .
+        ${{ matrix.command }}
+        # if there's a summary markdown in the container, show it.
+        container_id=$(docker container ls -al --format '{{ .ID }}')
+        docker cp $container_id:/home/ci/summary.md $GITHUB_STEP_SUMMARY || true
+
+  # See https://github.com/google/oss-fuzz/tree/master/projects/h2o for details
+  ossfuzz:
+    name: OSS Fuzz
+    runs-on: ubuntu-latest
+
+    # see above
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+
+    timeout-minutes: 60
+    steps:
+    - name: Build Fuzzers
+      uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@master
+      with:
+        oss-fuzz-project-name: 'h2o'
+        dry-run: false
+    - name: Run Fuzzers
+      uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@master
+      with:
+        oss-fuzz-project-name: 'h2o'
+        fuzz-seconds: 600
+        dry-run: false
+    - name: Upload Crash
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: artifacts
+        path: ./out/artifacts    steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
